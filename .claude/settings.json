@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/josee/source/repos/InvestmentPortfolio/src/InvestmentPortfolio.Api/Endpoints/Dividends/**)"
+    ]
+  }
+}

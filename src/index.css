@@ -1,0 +1,18 @@
+html { color-scheme: dark; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #0b0e11;
+  color: #eaecef;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #2b3139; border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: #3a4148; }
+*::-webkit-scrollbar-track { background: transparent; }
+button { font-family: inherit; }
+input, select, textarea { font-family: inherit; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: #FCD535 !important; }
+input::placeholder, textarea::placeholder { color: #5a626e; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
