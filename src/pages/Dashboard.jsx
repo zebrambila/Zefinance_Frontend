@@ -94,7 +94,7 @@ export default function Dashboard() {
     let cancelled = false;
     const today = new Date();
     const dateFrom = toDateParam(new Date(today.getFullYear(), today.getMonth() - 11, 1));
-    const dateTo = toDateParam(today);
+    const dateTo = toDateParam(new Date(today.getFullYear(), today.getMonth() + 1, 0));
     getPatrimonyEvolutionByMonth({ dateFrom, dateTo })
       .then((res) => { if (!cancelled) setPatrimonyMonthly(res?.data?.months ?? []); })
       .catch(() => { if (!cancelled) setPatrimonyMonthly([]); })
