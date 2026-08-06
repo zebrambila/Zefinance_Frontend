@@ -1,0 +1,22 @@
+name: zefinance
+
+services:
+  api:
+    build:
+      context: ../InvestmentPortfolio
+      dockerfile: src/InvestmentPortfolio.Api/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DefaultConnection: "Host=host.docker.internal;Database=InvestmentPortfolio;Username=postgres;Password=postgres"
+    ports:
+      - "5099:8080"
+
+  web:
+    build:
+      context: .
+      args:
+        VITE_API_BASE_URL: http://localhost:5099
+    depends_on:
+      - api
+    ports:
+      - "5173:80"

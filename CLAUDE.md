@@ -13,6 +13,10 @@ npm run dev      # dev server with HMR, http://localhost:5173
 npm run build    # production build to dist/
 npm run preview  # serve the production build locally
 npm run lint     # eslint .
+
+# Full stack (frontend + API) via Docker — requires the sibling ../InvestmentPortfolio
+# repo checked out, and postgres reachable on the host at the default port.
+docker-compose up --build   # web on :5173, api + Swagger UI on :5099/swagger
 ```
 
 There is no test suite configured in this repo.
