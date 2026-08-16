@@ -59,6 +59,8 @@ export default function Dashboard() {
   const [hoveredPatrimonyIndex, setHoveredPatrimonyIndex] = useState(null);
   const [hoveredDividendIndex, setHoveredDividendIndex] = useState(null);
   const [hoveredSegmentIndex, setHoveredSegmentIndex] = useState(null);
+  const [hoveredReturnIndex, setHoveredReturnIndex] = useState(null);
+  const [hoveredAporteIndex, setHoveredAporteIndex] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,7 +81,9 @@ export default function Dashboard() {
     const today = new Date();
     const dateFrom = toDateParam(new Date(today.getFullYear(), today.getMonth() - 11, 1));
     const dateTo = toDateParam(today);
-    getDividendsSummaryByAsset({ dateFrom, dateTo, top: 7 })
+    // No "top" limit: this powers the ranking (sliced to 7), the class breakdown and the
+    // yield-on-cost views below, which all need the full per-asset list, not just the top 7.
+    getDividendsSummaryByAsset({ dateFrom, dateTo })
       .then((res) => {
         if (cancelled) return;
         setTopDividends(res?.data?.assets ?? []);
@@ -113,8 +117,25 @@ export default function Dashboard() {
 
   useEffect(() => {
     let cancelled = false;
-    listTransactions({ pageSize: 100 })
-      .then((res) => { if (!cancelled) setTransactions(res?.data ?? []); })
+    // A custódia breakdown precisa de TODAS as transações já feitas pra netar a posição
+    // correta por ativo × custodiante — não dá pra confiar num pageSize fixo (podem existir
+    // mais transações do que qualquer cap fixo cobriria). Pagina até esgotar o servidor.
+    const fetchAllTransactions = async () => {
+      const pageSize = 500;
+      const SAFETY_MAX_PAGES = 100; // guarda contra loop infinito se a API responder algo inesperado
+      let pageNumber = 1;
+      let all = [];
+      for (; pageNumber <= SAFETY_MAX_PAGES; pageNumber++) {
+        const res = await listTransactions({ pageNumber, pageSize });
+        const page = res?.data ?? [];
+        all = all.concat(page);
+        const totalPages = res?.totalPages ?? 1;
+        if (pageNumber >= totalPages || page.length === 0) break;
+      }
+      return all;
+    };
+    fetchAllTransactions()
+      .then((all) => { if (!cancelled) setTransactions(all); })
       .catch(() => { if (!cancelled) setTransactions([]); })
       .finally(() => { if (!cancelled) setLoadingTransactions(false); });
     return () => { cancelled = true; };
@@ -122,11 +143,11 @@ export default function Dashboard() {
 
   const totalMarket = assets.reduce((sum, a) => sum + (a.currentTotalValue ?? 0), 0);
 
-  const buildDonutSegments = (groups) => {
+  const buildDonutSegments = (groups, total) => {
     let cumulativeDeg = 0;
     return groups.map(({ label, color, amount }) => {
-      const pct = totalMarket ? (amount / totalMarket) * 100 : 0;
-      const deg = totalMarket ? (amount / totalMarket) * 360 : 0;
+      const pct = total ? (amount / total) * 100 : 0;
+      const deg = total ? (amount / total) * 360 : 0;
       const startDeg = cumulativeDeg;
       cumulativeDeg += deg;
       return {
@@ -183,7 +204,7 @@ export default function Dashboard() {
     .map(([custodian, amount]) => ({ label: custodianLabel[custodian] ?? custodian, color: custodianColor[custodian] ?? '#707a8a', amount }));
 
   const distributionGroups = distributionView === 'ativo' ? assetGroups : distributionView === 'custodia' ? custodyGroups : classGroups;
-  const donutSegments = buildDonutSegments(distributionGroups);
+  const donutSegments = buildDonutSegments(distributionGroups, totalMarket);
   const donutGradient = buildGradientCss(donutSegments, hoveredSegmentIndex);
   const loadingDistribution = loadingAssets || (distributionView === 'custodia' && loadingTransactions);
 
@@ -201,7 +222,7 @@ export default function Dashboard() {
     : 0;
 
   const maxTopDividend = Math.max(1, ...topDividends.map((a) => a.total ?? 0));
-  const topDividendsRows = topDividends.map((a, i) => ({
+  const topDividendsRows = topDividends.slice(0, 7).map((a, i) => ({
     rank: String(i + 1).padStart(2, '0'),
     ticker: a.ticker ?? '—',
     name: a.name ?? '',
@@ -209,6 +230,50 @@ export default function Dashboard() {
     pct: (topDividendsTotal ? ((a.total ?? 0) / topDividendsTotal) * 100 : 0).toFixed(1).replace('.', ',') + '%',
     width: (((a.total ?? 0) / maxTopDividend) * 100).toFixed(1) + '%',
   }));
+
+  // Item 1: rentabilidade acumulada (%) mês a mês, derivada da mesma série de patrimônio.
+  const returnSeries = patrimony.map((m) => ({
+    label: m.label,
+    pct: m.invested ? ((m.marketValue - m.invested) / m.invested) * 100 : 0,
+  }));
+  const returnValues = returnSeries.map((p) => p.pct);
+  let returnMin = Math.min(0, ...returnValues);
+  let returnMax = Math.max(0, ...returnValues);
+  const returnPad = (returnMax - returnMin || 10) * 0.15;
+  returnMin -= returnPad;
+  returnMax += returnPad;
+  const returnYPct = (v) => ((returnMax - v) / (returnMax - returnMin || 1)) * 100;
+  const returnZeroY = returnYPct(0);
+  const returnPoints = returnSeries.map((p, i) => ({
+    ...p,
+    x: returnSeries.length > 1 ? (i / (returnSeries.length - 1)) * 100 : 50,
+    y: returnYPct(p.pct),
+  }));
+  const returnLinePath = returnPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(' ');
+  const tooltipReturn = hoveredReturnIndex !== null ? returnPoints[hoveredReturnIndex] : returnPoints[returnPoints.length - 1];
+  const lastReturnUp = (returnPoints[returnPoints.length - 1]?.pct ?? 0) >= 0;
+
+  // Item 2: aporte líquido por mês (delta de "invested" mês a mês), série completa.
+  const aportesSeries = patrimonyMonthly.slice(1).map((m, idx) => {
+    const prev = patrimonyMonthly[idx];
+    const aporte = (m.invested ?? 0) - (prev.invested ?? 0);
+    return { label: `${monthAbbrev[(m.month - 1 + 12) % 12]}/${String(m.year).slice(2)}`, aporte };
+  });
+  const maxAporteAbs = Math.max(1, ...aportesSeries.map((a) => Math.abs(a.aporte)));
+
+  // Item 4: cruza o total de dividendos por ativo (últimos 12 meses) com totalInvested de listAssets.
+  const assetByTicker = assets.reduce((acc, a) => { acc[a.ticker] = a; return acc; }, {});
+
+  const yieldOnCostRows = topDividends
+    .map((d) => {
+      const invested = assetByTicker[d.ticker]?.totalInvested ?? 0;
+      const pct = invested ? ((d.total ?? 0) / invested) * 100 : 0;
+      return { ticker: d.ticker ?? '—', name: d.name ?? '', total: d.total ?? 0, pct };
+    })
+    .filter((r) => r.pct > 0)
+    .sort((a, b) => b.pct - a.pct)
+    .slice(0, 7);
+  const maxYieldPct = Math.max(1, ...yieldOnCostRows.map((r) => r.pct));
 
   const dividendsByYear = Object.values(
     dividendsMonthly.reduce((acc, m) => {
@@ -377,6 +442,120 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* RETURN % + APORTES MENSAIS (candidatos novos — item 1 e 2) */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr', gap: 20, marginBottom: 20 }}>
+
+        <div style={{ background: '#1e2329', borderRadius: 12, padding: 24, border: '1px solid #2b3139' }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: '#ffffff' }}>Rentabilidade acumulada</div>
+          <div style={{ fontSize: 12, color: '#707a8a', marginTop: 2 }}>(Valor de mercado ÷ investido − 1) · últimos 12 meses</div>
+
+          {loadingPatrimony && (
+            <div style={{ padding: 24, textAlign: 'center', color: '#707a8a', fontSize: 13 }}>Carregando patrimônio...</div>
+          )}
+
+          {!loadingPatrimony && returnPoints.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', color: '#707a8a', fontSize: 13 }}>Nenhum dado de patrimônio encontrado.</div>
+          )}
+
+          {!loadingPatrimony && returnPoints.length > 0 && (
+          <div style={{ position: 'relative', height: 180, marginTop: 16 }}>
+            <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: 'absolute', inset: 0, overflow: 'visible' }}>
+              <line x1="0" y1={returnZeroY} x2="100" y2={returnZeroY} stroke="#2b3139" strokeWidth="0.5" vectorEffect="non-scaling-stroke" />
+              <path d={returnLinePath} fill="none" stroke={lastReturnUp ? '#0ecb81' : '#f6465d'} strokeWidth="1.6" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+            </svg>
+
+            <div style={{ position: 'absolute', inset: 0, display: 'flex' }}>
+              {returnPoints.map((p, i) => (
+                <div
+                  key={i}
+                  onMouseEnter={() => setHoveredReturnIndex(i)}
+                  onMouseLeave={() => setHoveredReturnIndex(null)}
+                  style={{ flex: 1, cursor: 'default' }}
+                />
+              ))}
+            </div>
+
+            {tooltipReturn && (
+              <div style={{
+                position: 'absolute', left: `${tooltipReturn.x}%`, top: `${tooltipReturn.y}%`, transform: 'translate(-50%, -50%)',
+                width: 8, height: 8, borderRadius: '50%', background: tooltipReturn.pct >= 0 ? '#0ecb81' : '#f6465d',
+                border: '2px solid #1e2329', pointerEvents: 'none'
+              }} />
+            )}
+
+            {tooltipReturn && (
+              <div style={{
+                position: 'absolute', right: 4, top: 4, background: '#2b3139', border: '1px solid #3a4148',
+                borderRadius: 8, padding: '8px 12px', pointerEvents: 'none', boxShadow: '0 8px 20px rgba(0,0,0,0.4)'
+              }}>
+                <div style={{ fontSize: 10, color: '#707a8a', marginBottom: 2 }}>{tooltipReturn.label}</div>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, fontWeight: 700, color: tooltipReturn.pct >= 0 ? '#0ecb81' : '#f6465d' }}>
+                  {(tooltipReturn.pct >= 0 ? '+' : '') + tooltipReturn.pct.toFixed(1).replace('.', ',')}%
+                </div>
+              </div>
+            )}
+          </div>
+          )}
+        </div>
+
+        <div style={{ background: '#1e2329', borderRadius: 12, padding: 24, border: '1px solid #2b3139' }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: '#ffffff' }}>Aportes líquidos por mês</div>
+          <div style={{ fontSize: 12, color: '#707a8a', marginTop: 2 }}>Variação do capital investido mês a mês</div>
+
+          {loadingPatrimony && (
+            <div style={{ padding: 24, textAlign: 'center', color: '#707a8a', fontSize: 13 }}>Carregando patrimônio...</div>
+          )}
+
+          {!loadingPatrimony && aportesSeries.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', color: '#707a8a', fontSize: 13 }}>Histórico insuficiente para calcular aportes.</div>
+          )}
+
+          {!loadingPatrimony && aportesSeries.length > 0 && (
+          <>
+          <div style={{ position: 'relative', height: 160, marginTop: 16 }}>
+            <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: 1, background: '#2b3139' }} />
+            <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', gap: 4 }}>
+              {aportesSeries.map((a, i) => {
+                const heightPct = (Math.abs(a.aporte) / maxAporteAbs) * 45;
+                const isPositive = a.aporte >= 0;
+                return (
+                  <div
+                    key={i}
+                    onMouseEnter={() => setHoveredAporteIndex(i)}
+                    onMouseLeave={() => setHoveredAporteIndex(null)}
+                    style={{ flex: 1, position: 'relative', cursor: 'default' }}
+                  >
+                    <div style={{
+                      position: 'absolute', left: '20%', right: '20%',
+                      ...(isPositive ? { bottom: '50%', height: `${heightPct}%` } : { top: '50%', height: `${heightPct}%` }),
+                      background: hoveredAporteIndex === i ? (isPositive ? '#3fd99b' : '#ff6b81') : (isPositive ? '#0ecb81' : '#f6465d'),
+                      borderRadius: isPositive ? '2px 2px 0 0' : '0 0 2px 2px',
+                    }} />
+                    {hoveredAporteIndex === i && (
+                      <div style={{
+                        position: 'absolute', left: '50%', transform: 'translateX(-50%)',
+                        ...(isPositive ? { bottom: `calc(50% + ${heightPct}% + 4px)` } : { top: `calc(50% + ${heightPct}% + 4px)` }),
+                        fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', pointerEvents: 'none',
+                        color: isPositive ? '#0ecb81' : '#f6465d'
+                      }}>
+                        {(isPositive ? '+ ' : '- ') + fmtBRL(Math.abs(a.aporte))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
+            {aportesSeries.map((a, i) => (
+              <div key={i} style={{ flex: 1, textAlign: 'center', fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: hoveredAporteIndex === i ? '#eaecef' : '#707a8a' }}>{a.label}</div>
+            ))}
+          </div>
+          </>
+          )}
+        </div>
+      </div>
+
       {/* DONUT + TOP DIVIDENDS */}
       <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr', gap: 20, marginBottom: 20 }}>
 
@@ -487,6 +666,39 @@ export default function Dashboard() {
           </div>
           )}
         </div>
+      </div>
+
+      {/* YIELD ON COST (candidato novo — item 4) */}
+      <div style={{ background: '#1e2329', borderRadius: 12, padding: 24, border: '1px solid #2b3139', marginBottom: 20 }}>
+        <div style={{ fontSize: 16, fontWeight: 600, color: '#ffffff' }}>Yield on cost por ativo</div>
+        <div style={{ fontSize: 12, color: '#707a8a', marginTop: 2 }}>Proventos (12 meses) ÷ total investido no ativo</div>
+
+        {loadingTopDividends && (
+          <div style={{ padding: 24, textAlign: 'center', color: '#707a8a', fontSize: 13 }}>Carregando proventos...</div>
+        )}
+
+        {!loadingTopDividends && yieldOnCostRows.length === 0 && (
+          <div style={{ padding: 24, textAlign: 'center', color: '#707a8a', fontSize: 13 }}>Nenhum provento encontrado.</div>
+        )}
+
+        {!loadingTopDividends && yieldOnCostRows.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 20 }}>
+          {yieldOnCostRows.map((r) => (
+            <div key={r.ticker}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ width: 22, height: 22, borderRadius: 6, background: assetColorOf(r.ticker), display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ffffff', fontWeight: 700, fontSize: 9, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{initialOf(r.ticker)}</div>
+                  <span style={{ fontSize: 13, color: '#eaecef', fontWeight: 600 }}>{r.ticker}</span>
+                </div>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: '#0ecb81', fontWeight: 700 }}>{r.pct.toFixed(1).replace('.', ',')}%</span>
+              </div>
+              <div style={{ height: 4, background: '#0b0e11', borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{ width: `${((r.pct / maxYieldPct) * 100).toFixed(1)}%`, height: '100%', background: '#0ecb81' }} />
+              </div>
+            </div>
+          ))}
+        </div>
+        )}
       </div>
 
       {/* DIVIDEND EVOLUTION */}

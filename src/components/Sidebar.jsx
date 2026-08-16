@@ -116,30 +116,6 @@ export default function Sidebar({ page, onNavigate }) {
 
       </div>
 
-      <div style={{
-        borderTop: '1px solid #2b3139', padding: collapsed ? '14px 0' : '14px 16px',
-        display: 'flex', flexDirection: collapsed ? 'column' : 'row', alignItems: 'center',
-        justifyContent: collapsed ? 'center' : 'flex-start', gap: 10
-      }}>
-        <div style={{
-          width: 32, height: 32, borderRadius: '50%',
-          background: 'linear-gradient(135deg, #FCD535, #f0b90b)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: '#181a20', fontWeight: 700, fontSize: 13, flexShrink: 0
-        }}>JE</div>
-        {!collapsed && (
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: '#eaecef', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>José Eduardo</div>
-            <div style={{ fontSize: 11, color: '#707a8a' }}>Investidor</div>
-          </div>
-        )}
-        <button title="Sair" style={{ background: 'transparent', border: 0, color: '#707a8a', cursor: 'pointer', padding: 4, display: 'flex' }}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M6 14H3.5A1.5 1.5 0 0 1 2 12.5v-9A1.5 1.5 0 0 1 3.5 2H6M11 11l3-3-3-3M14 8H6"/>
-          </svg>
-        </button>
-      </div>
-
     </aside>
   );
 }

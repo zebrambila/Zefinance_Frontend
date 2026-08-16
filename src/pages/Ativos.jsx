@@ -1,13 +1,14 @@
 import { useEffect, useState, useMemo } from 'react';
 import { initialOf } from '../data/mock.js';
 import { fmtBRL, fmtNum, fmtPct } from '../lib/format.js';
-import { listAssets, EAssetType } from '../api/index.js';
+import { listAssets, listTransactions, EAssetType, EOperationType, ECustodian } from '../api/index.js';
 import ImportAssetsModal from '../modals/ImportAssetsModal.jsx';
 import AssetDividendsModal from '../modals/AssetDividendsModal.jsx';
 import Pagination from '../components/Pagination.jsx';
 
 const PAGE_SIZE = 25;
 const classLabel = { [EAssetType.Acoes]: 'Ações', [EAssetType.FIIs]: 'FIIs' };
+const custodianLabel = { [ECustodian.BTG]: 'BTG Pactual', [ECustodian.Itau]: 'Itaú' };
 
 const tickerColorCache = {};
 const tickerColorOf = (ticker) => {
@@ -26,6 +27,8 @@ export default function Ativos({ refreshKey }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState('todos'); // 'todos' | 'acoes' | 'fiis'
+  const [custodianFilter, setCustodianFilter] = useState('todos'); // 'todos' | ECustodian.BTG | ECustodian.Itau
+  const [transactions, setTransactions] = useState([]); // snapshot p/ derivar custodiante por ativo
   const [search, setSearch] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [viewingDividendsOf, setViewingDividendsOf] = useState(null); // { assetId, ticker } | null
@@ -61,6 +64,16 @@ export default function Ativos({ refreshKey }) {
     return () => { cancelled = true; };
   }, [refreshKey, internalRefreshKey]);
 
+  useEffect(() => {
+    let cancelled = false;
+    // Não há campo "custodiante" no ativo em si — só nas transações. Buscamos tudo pra
+    // reconstruir, por ativo, em qual(is) custodiante(s) ele tem posição líquida positiva.
+    listTransactions({ pageSize: 1000 })
+      .then((res) => { if (!cancelled) setTransactions(res?.data ?? []); })
+      .catch(() => { if (!cancelled) setTransactions([]); });
+    return () => { cancelled = true; };
+  }, [refreshKey, internalRefreshKey]);
+
   const handleRefresh = () => {
     setLoading(true);
     setPage(1);
@@ -72,7 +85,52 @@ export default function Ativos({ refreshKey }) {
     setPage(1);
   };
 
-  const rows = useMemo(() => assets.map((a) => {
+  const handleCustodianFilterChange = (key) => {
+    setCustodianFilter(key);
+    setPage(1);
+  };
+
+  // Quantidade líquida por ativo × custodiante (Compra soma, Venda subtrai), a partir de
+  // todas as transações — usada só pra saber ONDE (em qual custodiante) o ativo tem posição.
+  const custodiansByAssetId = useMemo(() => {
+    const qtyByAssetCustodian = transactions.reduce((acc, t) => {
+      const key = `${t.assetId}|${t.custodian}`;
+      const signedQty = t.side === EOperationType.Compra ? (t.quantity ?? 0) : -(t.quantity ?? 0);
+      acc[key] = (acc[key] ?? 0) + signedQty;
+      return acc;
+    }, {});
+    return Object.entries(qtyByAssetCustodian).reduce((acc, [key, qty]) => {
+      if (qty <= 0) return acc;
+      const [assetId, custodian] = key.split('|');
+      if (!acc[assetId]) acc[assetId] = new Set();
+      acc[assetId].add(custodian);
+      return acc;
+    }, {});
+  }, [transactions]);
+
+  const hasCustodian = (assetId) => custodianFilter === 'todos' || custodiansByAssetId[assetId]?.has(custodianFilter);
+  const custodianActive = custodianFilter !== 'todos';
+
+  // Com filtro de custodiante ativo, a paginação do servidor não serve mais: o ativo pode
+  // estar em qualquer página do conjunto original. Filtramos e paginamos no cliente sobre
+  // `allAssets` (snapshot completo) em vez da página vinda do servidor.
+  const custodianFilteredAssets = useMemo(() => {
+    if (!custodianActive) return null;
+    const type = filter === 'acoes' ? EAssetType.Acoes : filter === 'fiis' ? EAssetType.FIIs : undefined;
+    return allAssets
+      .filter((a) => !type || a.type === type)
+      .filter((a) => custodiansByAssetId[a.assetId]?.has(custodianFilter));
+  }, [allAssets, custodianActive, custodianFilter, filter, custodiansByAssetId]);
+
+  const gridSource = custodianActive
+    ? custodianFilteredAssets.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+    : assets;
+  const gridTotalPages = custodianActive
+    ? Math.max(1, Math.ceil(custodianFilteredAssets.length / PAGE_SIZE))
+    : totalPages;
+  const gridTotalCount = custodianActive ? custodianFilteredAssets.length : totalCount;
+
+  const rows = useMemo(() => gridSource.map((a) => {
     const market = a.currentTotalValue ?? 0;
     const invested = a.totalInvested ?? 0;
     const pnl = market - invested;
@@ -88,7 +146,7 @@ export default function Ativos({ refreshKey }) {
       pnlPctFmt: fmtPct(pnlPct),
       pnlColor: up ? '#0ecb81' : '#f6465d',
     };
-  }), [assets]);
+  }), [gridSource]);
 
   const searchTerm = search.trim().toLowerCase();
   const filtered = searchTerm
@@ -116,6 +174,28 @@ export default function Ativos({ refreshKey }) {
     { key: 'fiis',  label: `FIIs · ${fiisCount}` },
   ];
 
+  // Item 5 (candidato novo): preço médio vs. cotação atual, por ativo.
+  const priceCompareRows = allAssets
+    .filter((a) => (a.averagePrice ?? 0) > 0 && (a.currentPrice ?? 0) > 0)
+    .filter((a) => hasCustodian(a.assetId))
+    .map((a) => {
+      const avg = a.averagePrice;
+      const current = a.currentPrice;
+      const rowMax = Math.max(avg, current);
+      const pct = ((current - avg) / avg) * 100;
+      return {
+        assetId: a.assetId,
+        ticker: a.ticker,
+        avgFmt: fmtBRL(avg),
+        currentFmt: fmtBRL(current),
+        avgWidth: `${((avg / rowMax) * 100).toFixed(1)}%`,
+        currentWidth: `${((current / rowMax) * 100).toFixed(1)}%`,
+        pct,
+        up: current >= avg,
+      };
+    })
+    .sort((a, b) => b.pct - a.pct);
+
   return (
     <div style={{ padding: '24px 32px 48px', flex: 1 }}>
 
@@ -137,6 +217,20 @@ export default function Ativos({ refreshKey }) {
             border: filter === c.key ? 0 : '1px solid #2b3139',
             borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: filter === c.key ? 600 : 500
           }}>{c.label}</button>
+        ))}
+        <div style={{ width: 1, height: 20, background: '#2b3139', margin: '0 2px' }} />
+        {[{ key: 'todos', label: 'Todas' }, { key: ECustodian.BTG, label: custodianLabel[ECustodian.BTG] }, { key: ECustodian.Itau, label: custodianLabel[ECustodian.Itau] }].map((c) => (
+          <button
+            key={c.key}
+            onClick={() => handleCustodianFilterChange(c.key)}
+            title="Filtro por custodiante"
+            style={{
+              height: 32, padding: '0 14px',
+              background: custodianFilter === c.key ? '#FCD535' : '#1e2329',
+              color: custodianFilter === c.key ? '#181a20' : '#eaecef',
+              border: custodianFilter === c.key ? 0 : '1px solid #2b3139',
+              borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: custodianFilter === c.key ? 600 : 500
+            }}>{c.label}</button>
         ))}
         <div style={{ flex: 1 }} />
         <div style={{ position: 'relative' }}>
@@ -247,7 +341,63 @@ export default function Ativos({ refreshKey }) {
         ))}
 
         {!loading && !error && (
-          <Pagination page={page} totalPages={totalPages} totalCount={totalCount} pageSize={PAGE_SIZE} onPageChange={setPage} />
+          <Pagination page={page} totalPages={gridTotalPages} totalCount={gridTotalCount} pageSize={PAGE_SIZE} onPageChange={setPage} />
+        )}
+      </div>
+
+      {/* PREÇO MÉDIO VS. COTAÇÃO ATUAL (candidato novo — item 5) */}
+      <div style={{ background: '#1e2329', borderRadius: 12, border: '1px solid #2b3139', padding: 24, marginTop: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#ffffff' }}>Preço médio vs. cotação atual</div>
+            <div style={{ fontSize: 12, color: '#707a8a', marginTop: 2 }}>Toda a carteira, ordenada por variação</div>
+          </div>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: '#707a8a' }} />
+              <span style={{ fontSize: 12, color: '#eaecef' }}>Preço médio</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: '#FCD535' }} />
+              <span style={{ fontSize: 12, color: '#eaecef' }}>Cotação atual</span>
+            </div>
+          </div>
+        </div>
+
+        {priceCompareRows.length === 0 && (
+          <div style={{ padding: 24, textAlign: 'center', color: '#707a8a', fontSize: 13 }}>Nenhum ativo com posição para comparar.</div>
+        )}
+
+        {priceCompareRows.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: 360, overflowY: 'auto', paddingRight: 4 }}>
+            {priceCompareRows.map((r) => (
+              <div key={r.assetId}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ width: 24, height: 24, borderRadius: 6, background: tickerColorOf(r.ticker), display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#ffffff', fontWeight: 700, fontSize: 10, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{initialOf(r.ticker)}</div>
+                    <span style={{ fontSize: 13, color: '#eaecef', fontWeight: 600 }}>{r.ticker}</span>
+                  </div>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700, color: r.up ? '#0ecb81' : '#f6465d' }}>
+                    {(r.up ? '+' : '') + r.pct.toFixed(1).replace('.', ',')}%
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ flex: 1, height: 6, background: '#0b0e11', borderRadius: 3, overflow: 'hidden' }}>
+                      <div style={{ width: r.avgWidth, height: '100%', background: '#707a8a' }} />
+                    </div>
+                    <span style={{ width: 76, textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#707a8a' }}>{r.avgFmt}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ flex: 1, height: 6, background: '#0b0e11', borderRadius: 3, overflow: 'hidden' }}>
+                      <div style={{ width: r.currentWidth, height: '100%', background: '#FCD535' }} />
+                    </div>
+                    <span style={{ width: 76, textAlign: 'right', fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: '#eaecef' }}>{r.currentFmt}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
