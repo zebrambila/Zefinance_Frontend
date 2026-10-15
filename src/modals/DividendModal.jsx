@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { parseNum } from '../lib/format.js';
 import ModalShell, { Label, CancelButton, SubmitButton } from '../components/ModalShell.jsx';
 import { inputStyle, monoInputStyle } from '../components/modalStyles.js';
-import { listAssets, getDividend, createDividend, updateDividend, ECustodian } from '../api/index.js';
+import { listAssets, getDividend, createDividend, updateDividend, getLastDividendForAsset, ECustodian } from '../api/index.js';
 
 const custodianLabel = { [ECustodian.BTG]: 'BTG Pactual', [ECustodian.Itau]: 'Itaú' };
 
@@ -43,6 +43,22 @@ export default function DividendModal({ dividendId, onClose, onSubmit }) {
       .finally(() => { if (!cancelled) setLoadingDividend(false); });
     return () => { cancelled = true; };
   }, [isEditing, dividendId]);
+
+  useEffect(() => {
+    if (isEditing || !assetId) return;
+    let cancelled = false;
+    getLastDividendForAsset(assetId).then((last) => {
+      if (cancelled) return;
+      if (last) {
+        setAmount(String(last.totalFinancial));
+        setCustodian(last.custodian);
+      } else {
+        setAmount('');
+        setCustodian('BTG');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [isEditing, assetId]);
 
   const valid = !!assetId && parseNum(amount) > 0 && !submitting && !loadingDividend;
 
