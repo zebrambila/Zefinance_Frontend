@@ -1,9 +1,11 @@
-import { useState } from 'react';
-import { syncAssetPrices, backfillAssetPrices } from '../api/index.js';
+import { useState, useEffect } from 'react';
+import { syncAssetPrices, backfillAssetPrices, getSyncStatus } from '../api/index.js';
+import { fmtDateTime } from '../lib/format.js';
 
 const ACTIONS = [
   {
     id: 'sync-prices',
+    statusKey: 'syncPrices',
     label: 'Sincronizar cotações',
     description: 'Atualiza o preço atual de todos os ativos cadastrados via Yahoo Finance.',
     route: 'POST /v1/assets/sync-prices',
@@ -12,6 +14,7 @@ const ACTIONS = [
   },
   {
     id: 'backfill-prices',
+    statusKey: 'backfillPrices',
     label: 'Carregar histórico de preços',
     description: 'Executa a rotina BackfillAsync, populando o histórico de preços de fechamento (últimos 12 meses) usado na evolução do patrimônio.',
     route: 'POST /v1/assets/BackfillPrices',
@@ -26,7 +29,20 @@ const ACTIONS = [
   },
 ];
 
-function ActionCard({ action }) {
+function LastRunLine({ loading, loadError, lastRun }) {
+  const base = { fontSize: 11, marginTop: 4, fontFamily: "'JetBrains Mono', monospace" };
+  if (loading) return <div style={{ ...base, color: '#707a8a' }}>Carregando última execução...</div>;
+  if (loadError) return <div style={{ ...base, color: '#f6465d' }}>Não foi possível carregar a última execução.</div>;
+  if (!lastRun) return <div style={{ ...base, color: '#707a8a' }}>Nunca executada</div>;
+  return (
+    <div style={{ ...base, color: '#eaecef' }}>
+      Última execução: {fmtDateTime(lastRun.executedAt)}
+      {!lastRun.success && <span style={{ color: '#f6465d' }}> · Falhou{lastRun.message ? `: ${lastRun.message}` : ''}</span>}
+    </div>
+  );
+}
+
+function ActionCard({ action, lastRun, loading, loadError, onExecuted }) {
   const [status, setStatus] = useState('idle'); // 'idle' | 'running' | 'done' | 'error'
   const [message, setMessage] = useState('');
 
@@ -40,6 +56,9 @@ function ActionCard({ action }) {
     } catch (err) {
       setMessage(err.message || 'Falha ao executar.');
       setStatus('error');
+    } finally {
+      // The backend records failed runs too, so refresh the last-run line either way.
+      onExecuted();
     }
   };
 
@@ -50,6 +69,7 @@ function ActionCard({ action }) {
           <div style={{ fontSize: 14, fontWeight: 600, color: '#ffffff' }}>{action.label}</div>
           <div style={{ fontSize: 12, color: '#707a8a', marginTop: 4 }}>{action.description}</div>
           <div style={{ fontSize: 11, color: '#5a626e', marginTop: 6, fontFamily: "'JetBrains Mono', monospace" }}>{action.route}</div>
+          <LastRunLine loading={loading} loadError={loadError} lastRun={lastRun} />
         </div>
         <button
           onClick={handleRun}
@@ -88,6 +108,28 @@ function ActionCard({ action }) {
 }
 
 export default function Configuracoes() {
+  const [syncStatus, setSyncStatus] = useState(null); // { syncPrices, backfillPrices } | null
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getSyncStatus();
+        if (cancelled) return;
+        setSyncStatus(res?.data ?? null);
+        setLoadError(false);
+      } catch {
+        if (!cancelled) setLoadError(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
   return (
     <div style={{ padding: '24px 32px 48px', flex: 1 }}>
       <div style={{ fontSize: 12, color: '#707a8a', marginBottom: 16 }}>
@@ -95,7 +137,14 @@ export default function Configuracoes() {
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {ACTIONS.map((action) => (
-          <ActionCard key={action.id} action={action} />
+          <ActionCard
+            key={action.id}
+            action={action}
+            lastRun={syncStatus?.[action.statusKey] ?? null}
+            loading={loading}
+            loadError={loadError}
+            onExecuted={() => setRefreshKey((k) => k + 1)}
+          />
         ))}
       </div>
     </div>

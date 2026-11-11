@@ -39,6 +39,13 @@ export const bulkCreateAssets = (assets) => apiPost('assets/BulkCreateAssets', {
 // Runs the BackfillAsync routine to populate historical closing prices (AssetPriceHistory).
 export const backfillAssetPrices = ({ months = 12 } = {}) => apiPost('assets/BackfillPrices', { months });
 
+// GET v1/assets/sync-status
+// -> Response<{ syncPrices, backfillPrices }> where each is { executedAt, success, message } or null
+// (null = routine never executed). Reflects the last run of POST sync-prices / POST BackfillPrices.
+// executedAt is an ISO 8601 timestamp without timezone suffix (server local time); failed runs are
+// recorded too, with success=false and the error message.
+export const getSyncStatus = () => apiGet('assets/sync-status');
+
 // GET v1/assets/{ticker}/dividends?months=&from=&to=
 // -> Response<{ date, amount }[]>
 // Queries Yahoo Finance for the ticker's dividend payment events and inserts any new ones
