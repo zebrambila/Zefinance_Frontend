@@ -13,6 +13,14 @@ export const fmtKShort = (n) => 'R$' + (n / 1000).toFixed(1) + 'k';
 
 export const parseNum = (v) => parseFloat(String(v).replace(',', '.')) || 0;
 
+// ISO 8601 timestamp -> 'DD/MM/YYYY HH:MM' (timestamps without a timezone suffix are read as local time).
+export const fmtDateTime = (iso) => {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
 // Accepts 'YYYY-MM-DD' or 'DD/MM/YYYY' and returns 'YYYY-MM-DD', or null if unparseable.
 export const parseDateFlexible = (v) => {
   const s = String(v).trim();
